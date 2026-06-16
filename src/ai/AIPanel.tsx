@@ -5,7 +5,7 @@ import { useAIStore } from '@/store/aiStore'
 import { useContentStore } from '@/store/contentStore'
 import { streamChatMessage, testConnection, setWorkerConfig, getWorkerUrl } from './api'
 import { STUDENT_SYSTEM_PROMPT, FACULTY_SYSTEM_PROMPT } from './prompts'
-import { pushContentToGitHub, pushSourceFilesToGitHub, testGitHubConnection, getGitHubConfig, setGitHubConfig, isGitHubConfigured, forkMainRepo, getGitHubUsername, waitForForkReady, enableGitHubPages, setupForkWithPages, resolveGithubOwner, listRepoContents, createNewRepo, copyEntireRepo, setupDirectEdit, generateCharactersTS, generateDialogueTS, generateGameMetaTS, getFileContent, setGitHubWorkerConfig, getGitHubWorkerUrl } from './github'
+import { pushContentToGitHub, pushSourceFilesToGitHub, testGitHubConnection, getGitHubConfig, setGitHubConfig, isGitHubConfigured, forkMainRepo, getGitHubUsername, waitForForkReady, enableGitHubPages, setupForkWithPages, resolveGithubOwner, listRepoContents, createNewRepo, copyEntireRepo, syncContentToExistingRepo, setupDirectEdit, generateCharactersTS, generateDialogueTS, generateGameMetaTS, getFileContent, setGitHubWorkerConfig, getGitHubWorkerUrl } from './github'
 import { MAIN_REPO } from './github'
 import { loadGIS, initGoogleDrive, loginToDrive, isLoggedIn, logout, uploadContentToDrive, uploadFullRepoToDrive } from './googleDrive'
 import type { GitHubConfig } from './github'
@@ -182,7 +182,7 @@ function AISettings() {
   const handleTestConnection = async () => {
     setTesting(true); setTestStatus('⏳ جارٍ اختبار الاتصال...')
     try {
-      const r = await testConnection(ai.providerId, ai.modelId, ai.apiKeys[ai.providerId] || '', ai.customBaseUrl)
+      const r = await testConnection(ai.providerId, ai.modelId, ai.apiKeys[ai.providerId] || '', ai.customBaseUrl, ai.useDirectApi)
       setTestStatus(r)
     } catch (e: any) { setTestStatus(`⚠️ ${e.message}`) }
     setTesting(false)
@@ -234,6 +234,28 @@ function AISettings() {
       <label style={{ color: '#aaa' }}>{provider?.apiKeyLabel || 'API Key'}
         <input type="password" value={ai.apiKeys[ai.providerId] || ''} onChange={(e) => ai.setApiKey(ai.providerId, e.target.value)} placeholder="sk-..." style={inputStyle} />
       </label>
+      <label style={{ 
+        display: 'flex', alignItems: 'center', gap: '8px', color: '#aaa', cursor: 'pointer',
+        padding: '8px', borderRadius: '6px', background: 'rgba(255,255,255,0.05)',
+        border: `1px solid ${ai.useDirectApi ? 'rgba(255,193,7,0.5)' : 'rgba(255,255,255,0.1)'}`,
+      }}>
+        <input 
+          type="checkbox" 
+          checked={ai.useDirectApi} 
+          onChange={(e) => ai.setUseDirectApi(e.target.checked)}
+          style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+        />
+        <span>الاتصال المباشر (بدون Worker Proxy)</span>
+      </label>
+      {ai.useDirectApi && (
+        <div style={{
+          padding: '8px', borderRadius: '6px', fontSize: '11px',
+          background: 'rgba(255,193,7,0.1)', border: '1px solid rgba(255,193,7,0.3)',
+          color: '#FFC107',
+        }}>
+          ⚠️ تحذير: الاتصال المباشر يكشف مفتاح API في المتصفح. استخدمه على مسؤوليتك الخاصة.
+        </div>
+      )}
       <button onClick={handleTestConnection} disabled={testing} style={{
         padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)',
         background: testing ? '#444' : 'linear-gradient(135deg,#4FC3F7,#29B6F6)',
@@ -345,6 +367,39 @@ function AISettings() {
             setGhForking(false)
           }} disabled={ghForking || !ghConfig.token} style={{ width: '100%', padding: '8px', borderRadius: '6px', border: 'none', background: ghForking ? '#444' : 'linear-gradient(135deg,#FFB74D,#FF9800)', color: ghForking ? '#888' : '#0a0a1a', fontWeight: 700, fontSize: '11px', cursor: ghForking ? 'not-allowed' : 'pointer', opacity: !ghConfig.token ? 0.5 : 1 }}>
             {ghForking ? '⏳ جارٍ الإنشاء والرفع...' : '🟡 إنشاء مستودع جديد'}
+          </button>
+        </div>
+
+        {/* خيار 3: مزامنة مع مستودع موجود */}
+        <div style={{ background: 'rgba(79,195,247,0.1)', border: '1px solid rgba(79,195,247,0.3)', borderRadius: '6px', padding: '8px', marginBottom: '8px' }}>
+          <div style={{ color: '#4FC3F7', fontWeight: 700, fontSize: '11px', marginBottom: '6px' }}>🔄 الخيار 3: مزامنة مع مستودع موجود</div>
+          <div style={{ color: '#aaa', fontSize: '10px', marginBottom: '6px' }}>يُحدّث الملفات الموجودة ويضيف الملفات الناقصة في مستودعك</div>
+          <button onClick={async () => {
+            if (!ghConfig.token) { setGhTestStatus('❌ أدخل Token أولاً'); return }
+            if (!ghConfig.repo) { setGhTestStatus('❌ أدخل اسم المستودع'); return }
+            setGhForking(true); setGhTestStatus('⏳ جارٍ المزامنة مع المستودع...')
+            await setGitHubConfig(ghConfig)
+            try {
+              const username = await getGitHubUsername()
+              setGhConfig({ ...ghConfig, owner: username })
+              await setGitHubConfig({ ...ghConfig, owner: username })
+              setGhTestStatus(`⏳ جارٍ مزامنة الملفات مع ${username}/${ghConfig.repo}...`)
+              const contentData = {
+                gameMeta: contentStore.gameMeta as unknown as Record<string, unknown>,
+                levels: (contentStore.newLevels || []) as unknown[],
+                characters: contentStore.newCharacters as Record<string, unknown>,
+              }
+              const results = await syncContentToExistingRepo(MAIN_REPO.owner, MAIN_REPO.repo, username, ghConfig.repo, ghConfig.branch || 'main', contentData)
+              setGhConfig({ ...ghConfig, owner: username })
+              await setGitHubConfig({ ...ghConfig, owner: username })
+              const ok = results.filter(r => r.startsWith('✅') || r.startsWith('🔄')).length
+              const fail = results.filter(r => r.startsWith('❌')).length
+              const warn = results.filter(r => r.startsWith('⚠️')).length
+              setGhTestStatus(`✅ تمت المزامنة!\n📦 ${username}/${ghConfig.repo}\n✅ نجح ${ok} | ❌ فشل ${fail} | ⚠️ تحذير ${warn}\n\n${results.join('\n')}`)
+            } catch (e: any) { setGhTestStatus(`❌ ${e.message}`) }
+            setGhForking(false)
+          }} disabled={ghForking || !ghConfig.token} style={{ width: '100%', padding: '8px', borderRadius: '6px', border: 'none', background: ghForking ? '#444' : 'linear-gradient(135deg,#4FC3F7,#29B6F6)', color: ghForking ? '#888' : '#0a0a1a', fontWeight: 700, fontSize: '11px', cursor: ghForking ? 'not-allowed' : 'pointer', opacity: !ghConfig.token ? 0.5 : 1 }}>
+            {ghForking ? '⏳ جارٍ المزامنة...' : '🔄 مزامنة مع مستودع موجود'}
           </button>
         </div>
 
@@ -883,27 +938,107 @@ function FileUploadButton({ onFiles }: { onFiles: (files: File[]) => void }) {
   )
 }
 
+function extractVideoFrames(file: File, maxFrames = 5): Promise<string[]> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video')
+    video.preload = 'metadata'
+    video.muted = true
+    const url = URL.createObjectURL(file)
+    video.src = url
+    video.onloadedmetadata = async () => {
+      const duration = video.duration || 10
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { URL.revokeObjectURL(url); resolve([]); return }
+      canvas.width = 640
+      canvas.height = 360
+      const frames: string[] = []
+      const step = duration / (maxFrames + 1)
+      for (let i = 1; i <= maxFrames; i++) {
+        try {
+          video.currentTime = step * i
+          await new Promise((r) => { video.onseeked = () => r(undefined) })
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+          frames.push(canvas.toDataURL('image/jpeg', 0.7))
+        } catch { break }
+      }
+      URL.revokeObjectURL(url)
+      resolve(frames)
+    }
+    video.onerror = () => { URL.revokeObjectURL(url); resolve([]) }
+  })
+}
+
+function transcribeAudio(file: File): Promise<string> {
+  return new Promise((resolve) => {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      resolve(`[صوت: ${file.name} (${(file.size / 1024).toFixed(0)}KB)]`)
+      return
+    }
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+    const ctx = new AudioCtx()
+    file.arrayBuffer().then((buf) => ctx.decodeAudioData(buf)).then((audioBuf) => {
+      const duration = audioBuf.duration.toFixed(1)
+      const channels = audioBuf.numberOfChannels
+      const sampleRate = audioBuf.sampleRate
+      const data = audioBuf.getChannelData(0)
+      let rms = 0
+      for (let i = 0; i < data.length; i += 1000) rms += data[i]! * data[i]!
+      rms = Math.sqrt(rms / (data.length / 1000))
+      const peak = Math.max(...Array.from(data).filter((_, i) => i % 1000 === 0).map(Math.abs))
+      const silenceThreshold = peak * 0.05
+      let speechSegments = 0
+      let inSpeech = false
+      for (let i = 0; i < data.length; i += sampleRate * 0.1) {
+        const chunkRms = Math.sqrt(Array.from(data.slice(i, i + sampleRate * 0.1)).reduce((s, v) => s + v * v, 0) / (sampleRate * 0.1))
+        if (chunkRms > silenceThreshold && !inSpeech) { speechSegments++; inSpeech = true }
+        else if (chunkRms <= silenceThreshold) inSpeech = false
+      }
+      ctx.close()
+      const desc = `[صوت: ${file.name}]\nالمدة: ${duration}ث | القنوات: ${channels} | معدل العينات: ${sampleRate}Hz\nالصوت: ${peak > 0.1 ? 'واضح' : 'هادئ'} (${(rms * 100).toFixed(1)}% مستوى)\nتقدير كلمات: ~${Math.round(speechSegments * 2.5)} كلمة`
+      resolve(desc)
+    }).catch(() => {
+      resolve(`[صوت: ${file.name} (${(file.size / 1024).toFixed(0)}KB)]`)
+    })
+  })
+}
+
 function readFiles(files: File[], onStatus?: (idx: number, status: 'success' | 'error', error?: string) => void): Promise<ChatAttachment[]> {
-  return Promise.all(files.map((file, idx) => new Promise<ChatAttachment>((resolve) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const content = reader.result as string
-      const att: ChatAttachment = file.type.startsWith('image/')
-        ? { name: file.name, type: 'image', content, mimeType: file.type, uploadStatus: 'success' }
-        : file.type.startsWith('video/')
-        ? { name: file.name, type: 'video', content: `[فيديو: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB)]`, mimeType: file.type, uploadStatus: 'success' }
-        : file.type.startsWith('audio/')
-        ? { name: file.name, type: 'audio', content: `[صوت: ${file.name} (${(file.size / 1024).toFixed(0)}KB)]`, mimeType: file.type, uploadStatus: 'success' }
-        : { name: file.name, type: 'text', content, mimeType: file.type, uploadStatus: 'success' }
+  return Promise.all(files.map(async (file, idx) => {
+    try {
+      if (file.type.startsWith('image/')) {
+        const content = await new Promise<string>((res, rej) => {
+          const r = new FileReader()
+          r.onload = () => res(r.result as string)
+          r.onerror = () => rej(new Error('read failed'))
+          r.readAsDataURL(file)
+        })
+        onStatus?.(idx, 'success')
+        return { name: file.name, type: 'image' as const, content, mimeType: file.type, uploadStatus: 'success' as const }
+      }
+      if (file.type.startsWith('video/')) {
+        const frames = await extractVideoFrames(file)
+        onStatus?.(idx, 'success')
+        return { name: file.name, type: 'video' as const, content: frames.join('|||'), mimeType: file.type, uploadStatus: 'success' as const, videoFrames: frames }
+      }
+      if (file.type.startsWith('audio/')) {
+        const desc = await transcribeAudio(file)
+        onStatus?.(idx, 'success')
+        return { name: file.name, type: 'audio' as const, content: desc, mimeType: file.type, uploadStatus: 'success' as const }
+      }
+      const content = await new Promise<string>((res, rej) => {
+        const r = new FileReader()
+        r.onload = () => res(r.result as string)
+        r.onerror = () => rej(new Error('read failed'))
+        r.readAsText(file)
+      })
       onStatus?.(idx, 'success')
-      resolve(att)
-    }
-    reader.onerror = () => {
+      return { name: file.name, type: 'text' as const, content, mimeType: file.type, uploadStatus: 'success' as const }
+    } catch {
       onStatus?.(idx, 'error', 'فشل قراءة الملف')
-      resolve({ name: file.name, type: 'file', content: `[ملف: ${file.name}]`, mimeType: file.type, uploadStatus: 'error', uploadError: 'فشل قراءة الملف' })
+      return { name: file.name, type: 'file' as const, content: `[ملف: ${file.name}]`, mimeType: file.type, uploadStatus: 'error' as const, uploadError: 'فشل قراءة الملف' }
     }
-    if (file.type.startsWith('image/')) reader.readAsDataURL(file); else reader.readAsText(file)
-  })))
+  }))
 }
 
 function StudentChat() {
@@ -926,7 +1061,7 @@ function StudentChat() {
     try {
       const systemMsg: AIMessage = { role: 'system', content: STUDENT_SYSTEM_PROMPT }
       let full = ''; let lastUpdate = 0; const THROTTLE_MS = 80
-      const gen = streamChatMessage(ai.providerId, ai.modelId, [systemMsg, ...msgs], ai.apiKeys[ai.providerId] || '', ai.customBaseUrl)
+      const gen = streamChatMessage(ai.providerId, ai.modelId, [systemMsg, ...msgs], ai.apiKeys[ai.providerId] || '', ai.customBaseUrl, undefined, undefined, ai.useDirectApi)
       for await (const chunk of gen) {
         full += chunk
         const now = Date.now()
@@ -1090,7 +1225,7 @@ function FacultyAIChat() {
       const systemMsg: AIMessage = { role: 'system', content: FACULTY_SYSTEM_PROMPT }
       const chatMsgs = msgs.filter((m) => m !== contextMsg)
       let full = ''; let lastUpdate = 0; const THROTTLE_MS = 80
-      const gen = streamChatMessage(ai.providerId, ai.modelId, [systemMsg, ...chatMsgs, contextMsg], ai.apiKeys[ai.providerId] || '', ai.customBaseUrl)
+      const gen = streamChatMessage(ai.providerId, ai.modelId, [systemMsg, ...chatMsgs, contextMsg], ai.apiKeys[ai.providerId] || '', ai.customBaseUrl, undefined, undefined, ai.useDirectApi)
       for await (const chunk of gen) {
         full += chunk
         const now = Date.now()
@@ -1226,14 +1361,25 @@ function FacultyDataEditor() {
   useEffect(() => {
     if (!autoUpload) return
     const unsub = useContentStore.subscribe((state) => {
-      const files = state.modifiedFiles
-      if (Object.keys(files).length === 0) return
-      pushSourceFilesToGitHub(files, 'Auto-sync: تعديل ملفات').catch((e) => {
+      const baseFiles: Record<string, string> = {
+        'src/data/characters.ts': generateCharactersTS(chars),
+        'src/data/dialogue.ts': generateDialogueTS(levels),
+        'src/data/gameMeta.ts': generateGameMetaTS(gameMeta as unknown as Record<string, unknown>),
+      }
+      const allFiles = { ...baseFiles, ...state.modifiedFiles }
+      ai.setGithubStatus('⏳ جارٍ الرفع التلقائي...')
+      pushSourceFilesToGitHub(allFiles, '🔄 رفع تلقائي — تعديل تلقائي').then((results) => {
+        const allOk = results.every((r) => r.startsWith('✅'))
+        ai.setGithubStatus(allOk
+          ? `✅ تم الرفع التلقائي — ${results.length} ملف`
+          : `⚠️ الرفع التلقائي: بعض الملفات فشلت`)
+      }).catch((e) => {
         console.error('Auto-upload failed:', e)
+        ai.setGithubStatus(`❌ فشل الرفع التلقائي: ${e.message}`)
       })
     })
     return unsub
-  }, [autoUpload])
+  }, [autoUpload, chars, levels, gameMeta])
 
   const handleLoadFile = async (filePath: string) => {
     setFileLoading(true)
@@ -1499,6 +1645,37 @@ function FacultyDataEditor() {
             </button>
           </div>
 
+          {/* خيار 3: مزامنة مع مستودع موجود */}
+          <div style={{ background: 'rgba(79,195,247,0.1)', border: '1px solid rgba(79,195,247,0.3)', borderRadius: '6px', padding: '8px', marginBottom: '8px' }}>
+            <div style={{ color: '#4FC3F7', fontWeight: 700, fontSize: '11px', marginBottom: '4px' }}>🔄 مزامنة مع مستودع موجود</div>
+            <div style={{ color: '#aaa', fontSize: '10px', marginBottom: '6px' }}>يُحدّث الملفات ويضيف الناقصة في مستودعك</div>
+            <button onClick={async () => {
+              if (!ghConfig.token) { ai.setGithubStatus('❌ أدخل Token أولاً'); return }
+              if (!ghConfig.repo) { ai.setGithubStatus('❌ أدخل اسم المستودع'); return }
+              ai.setForking(true); ai.setGithubStatus('⏳ جارٍ المزامنة...')
+              await setGitHubConfig(ghConfig)
+              try {
+                const username = await getGitHubUsername()
+                setGhConfig({ ...ghConfig, owner: username })
+                await setGitHubConfig({ ...ghConfig, owner: username })
+                ai.setGithubStatus(`⏳ جارٍ مزامنة الملفات مع ${username}/${ghConfig.repo}...`)
+                const contentData = {
+                  gameMeta: contentStore.gameMeta as unknown as Record<string, unknown>,
+                  levels: (contentStore.newLevels || []) as unknown[],
+                  characters: contentStore.newCharacters as Record<string, unknown>,
+                }
+                const results = await syncContentToExistingRepo(MAIN_REPO.owner, MAIN_REPO.repo, username, ghConfig.repo, ghConfig.branch || 'main', contentData)
+                const ok = results.filter(r => r.startsWith('✅') || r.startsWith('🔄')).length
+                const fail = results.filter(r => r.startsWith('❌')).length
+                const warn = results.filter(r => r.startsWith('⚠️')).length
+                ai.setGithubStatus(`✅ تمت المزامنة!\n📦 ${username}/${ghConfig.repo}\n✅ نجح ${ok} | ❌ فشل ${fail} | ⚠️ تحذير ${warn}\n\n${results.join('\n')}`)
+              } catch (e: any) { ai.setGithubStatus(`❌ ${e.message}`) }
+              ai.setForking(false)
+            }} disabled={ai.forking || !ghConfig.token} style={{ width: '100%', padding: '8px', borderRadius: '6px', border: 'none', background: ai.forking ? '#444' : 'linear-gradient(135deg,#4FC3F7,#29B6F6)', color: ai.forking ? '#888' : '#0a0a1a', fontWeight: 700, fontSize: '11px', cursor: ai.forking ? 'not-allowed' : 'pointer', opacity: !ghConfig.token ? 0.5 : 1 }}>
+              {ai.forking ? '⏳ جارٍ المزامنة...' : '🔄 مزامنة مع مستودع موجود'}
+            </button>
+          </div>
+
           <label style={{ color: '#aaa', display: 'block', marginBottom: '4px' }}>GitHub Token<input type="password" value={ghConfig.token} onChange={(e) => setGhConfig({ ...ghConfig, token: e.target.value })} placeholder="ghp_..." style={inputStyle} /></label>
           <label style={{ color: '#aaa', display: 'block', marginBottom: '4px' }}>Owner (اسم المستخدم أو الإيميل)<input value={ghConfig.owner} onChange={(e) => setGhConfig({ ...ghConfig, owner: e.target.value })} placeholder="your-username أو email@github.com" style={inputStyle} /></label>
           <label style={{ color: '#aaa', display: 'block', marginBottom: '4px' }}>Repo (اسم المستودع)<input value={ghConfig.repo} onChange={(e) => setGhConfig({ ...ghConfig, repo: e.target.value })} placeholder="cyber-guardians-mobile" style={inputStyle} /></label>
@@ -1615,10 +1792,16 @@ function FacultyDataEditor() {
             <>
               <div style={{ padding: '8px', fontSize: '10px', color: '#777', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
                 <div style={{ marginBottom: '6px' }}>اختر ملفاً للتعديل — التعديلات تُحفظ محلياً وتُرفع عند التفعيل</div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: autoUpload ? '#81C784' : '#888' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: autoUpload ? '#81C784' : '#888', padding: '6px', borderRadius: '4px', background: autoUpload ? 'rgba(129,199,132,0.1)' : 'transparent', border: `1px solid ${autoUpload ? 'rgba(129,199,132,0.3)' : 'rgba(255,255,255,0.1)'}` }}>
                   <input type="checkbox" checked={autoUpload} onChange={(e) => { setAutoUpload(e.target.checked); localStorage.setItem('cg-auto-upload', String(e.target.checked)) }} style={{ cursor: 'pointer' }} />
-                  🔄 رفع تلقائي عند التعديل
+                  <span>🔄 رفع تلقائي عند التعديل</span>
+                  {autoUpload && <span style={{ fontSize: '9px', color: '#81C784', marginRight: 'auto' }}>● مفعّل</span>}
                 </label>
+                {autoUpload && (
+                  <div style={{ marginTop: '4px', padding: '4px 6px', borderRadius: '4px', background: 'rgba(129,199,132,0.08)', fontSize: '9px', color: '#81C784', lineHeight: 1.4 }}>
+                    💡 يُرفع تلقائياً: الشخصيات + المستويات + الإعدادات + الملفات المعدّلة يدوياً
+                  </div>
+                )}
               </div>
               <div style={{ flex: 1, overflow: 'auto', padding: '8px' }}>
                 {EDITABLE_FILES.map((fp) => {
